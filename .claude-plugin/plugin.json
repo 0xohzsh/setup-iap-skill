@@ -1,0 +1,13 @@
+{
+  "name": "setup-iap",
+  "description": "Fair country (purchasing-power) pricing for App Store in-app purchases and Google Play subscriptions: plan per-country prices, write them to the stores, verify them.",
+  "version": "1.0.0",
+  "author": {
+    "name": "0xohzsh",
+    "url": "https://github.com/0xohzsh"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/0xohzsh/setup-iap-skill",
+  "repository": "https://github.com/0xohzsh/setup-iap-skill",
+  "keywords": ["in-app purchase", "pricing", "ppp", "app store", "google play", "subscriptions", "skill"]
+}

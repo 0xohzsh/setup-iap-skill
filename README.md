@@ -33,7 +33,7 @@ Every country is in one of five groups ("tiers"). Each group pays a share of App
 | 4 | 40% | India, Indonesia, Egypt, Vietnam |
 | 5 | 25% | Pakistan, Nepal, Ethiopia |
 
-The full list of 250 countries is in [`setup-iap/assets/tiers.json`](setup-iap/assets/tiers.json). It comes from [activationpal.com/country-pricing](https://activationpal.com/country-pricing). Don't agree with a country's tier? You can move it (see "Change a country's tier" below).
+The full list of 250 countries is in [`skills/setup-iap/assets/tiers.json`](skills/setup-iap/assets/tiers.json). It comes from [activationpal.com/country-pricing](https://activationpal.com/country-pricing). Don't agree with a country's tier? You can move it (see "Change a country's tier" below).
 
 The skill always snaps to a real store price that ends in 99 or .99 where one is close (₹149, $2.99), so prices look natural. It never makes anything free, and never charges more than Apple's normal price. Want a different share for one product, for example a cheaper yearly plan in tiers 4 and 5? That is one line in the pricing config (below).
 
@@ -60,13 +60,24 @@ The skill always snaps to a real store price that ends in 99 or .99 where one is
 
 ## Install the skill
 
+In Claude Code, run:
+
+```
+/plugin marketplace add 0xohzsh/setup-iap-skill
+/plugin install setup-iap@setup-iap-skill
+```
+
+Restart Claude Code. Ask for regional pricing in plain words, or type `/setup-iap:setup-iap`. Update later with `/plugin update setup-iap@setup-iap-skill`.
+
+Prefer a plain skill folder? Copy it instead:
+
 ```bash
 git clone https://github.com/0xohzsh/setup-iap-skill.git
 mkdir -p ~/.claude/skills
-cp -R setup-iap-skill/setup-iap ~/.claude/skills/setup-iap
+cp -R setup-iap-skill/skills/setup-iap ~/.claude/skills/setup-iap
 ```
 
-Restart Claude Code. The skill is now available as `/setup-iap`.
+Then it is `/setup-iap`.
 
 ---
 
@@ -155,7 +166,7 @@ Then ask Claude to use it ("use overrides.json"). The codes are three-letter cou
 The scripts need only Node.js, so you can run them yourself. One App Store product at a time:
 
 ```bash
-cd setup-iap
+cd skills/setup-iap
 node scripts/iap-tiers.mjs estimate --price 4.99 --out ./prices                       # offline USD estimate
 node scripts/iap-tiers.mjs plan --kind iap --product <IAP_ID> --app <APP_ID>          # exact local prices
 node scripts/iap-tiers.mjs apply --plan iap-pricing/<IAP_ID>/plan.json                # shows what would change
@@ -177,7 +188,7 @@ node scripts/play-tiers.mjs verify --config pricing.config.json           # Goog
 
 ## How it works (for the curious)
 
-For each product the script reads your US price. It then asks Apple for that price's full equivalent in every country (the "anchor"), multiplies the anchor by the country's tier share, and picks a real Apple price at or below the anchor: one ending in 99 if it is close, otherwise the closest. Google Play has no fixed price list, so `play-tiers.mjs` asks Google to convert each tier's share of the US price into local money, rounds it the same way, and keeps tier 1 countries at the price Play charges today. Full details, App Store Connect endpoints and known caveats are in [`setup-iap/REFERENCE.md`](setup-iap/REFERENCE.md).
+For each product the script reads your US price. It then asks Apple for that price's full equivalent in every country (the "anchor"), multiplies the anchor by the country's tier share, and picks a real Apple price at or below the anchor: one ending in 99 if it is close, otherwise the closest. Google Play has no fixed price list, so `play-tiers.mjs` asks Google to convert each tier's share of the US price into local money, rounds it the same way, and keeps tier 1 countries at the price Play charges today. Full details, App Store Connect endpoints and known caveats are in [`skills/setup-iap/REFERENCE.md`](skills/setup-iap/REFERENCE.md).
 
 ## Limits
 
@@ -191,4 +202,4 @@ Country tiers: [activationpal.com/country-pricing](https://activationpal.com/cou
 
 ## License
 
-MIT for the code (see [LICENSE](LICENSE)). The country tier list in `setup-iap/assets/tiers.json` comes from activationpal.com.
+MIT for the code (see [LICENSE](LICENSE)). The country tier list in `skills/setup-iap/assets/tiers.json` comes from activationpal.com.
