@@ -1,13 +1,64 @@
 ---
 name: setup-iap
-description: Plans and applies tiered regional (purchasing-power) pricing for App Store in-app purchases: auto-renewable subscriptions, consumables, non-consumables and non-renewing subscriptions, for any app. Produces per-country price tables (Markdown + JSON) or writes the prices to App Store Connect with the asc CLI, then verifies them. Use when the user runs /setup-iap or asks for regional, country, PPP or tiered pricing of subscriptions, one-time purchases, consumables or non-consumables.
+description: Plans and applies tiered regional (purchasing-power) pricing for App Store in-app purchases (auto-renewable subscriptions, consumables, non-consumables, non-renewing subscriptions) and Google Play subscriptions, for any app. Produces per-country price tables (Markdown + JSON) or writes the prices to App Store Connect (asc CLI) and Google Play (Play Developer API), then verifies them. A per-app pricing config makes later runs one command per store. Use when the user runs /setup-iap or asks for regional, country, PPP or tiered pricing of subscriptions, one-time purchases, consumables or non-consumables.
 ---
 
 # Setup IAP tiered pricing
 
 Every country sits in one of five tiers (`assets/tiers.json`, from activationpal.com/country-pricing). A tier pays a fixed share of Apple's equalized local price for the US base price: 100%, 80%, 60%, 40% or 25%. The US price never changes.
 
-All mechanics live in `scripts/iap-tiers.mjs` (Node 18+, no dependencies). It uses the `asc` CLI for every App Store Connect call, so `asc auth` must already work (`asc doctor` checks it).
+All mechanics are Node 18+ scripts with no dependencies:
+- `scripts/iap-tiers.mjs`: one App Store product. Uses the `asc` CLI, so `asc auth` must work (`asc doctor` checks it).
+- `scripts/plan-all.mjs`: every App Store product in a pricing config, with rule repair.
+- `scripts/play-tiers.mjs`: Google Play subscriptions from the same config (plan, apply, verify). Needs a Play service account JSON with "Manage orders and subscriptions".
+- `scripts/pricing-lib.mjs`: the shared rounding and rule logic.
+
+## Fast path: the app already has a pricing config
+
+Look for `pricing.config.json` in the app repo (for example `aso/pricing.config.json`). If it exists, the decisions are already made. Do not re-derive shares, pins or rules; run:
+
+```bash
+node scripts/plan-all.mjs --config <app>/pricing.config.json                  # App Store plans + repair
+node scripts/play-tiers.mjs plan --config <app>/pricing.config.json           # Play plan + repair
+```
+
+Show `<out>/summary.md` and `<out>/play-plan.md`. After an explicit yes:
+
+```bash
+node scripts/iap-tiers.mjs apply --plan <out>/<key>/plan.json --yes            # each App Store product
+node scripts/play-tiers.mjs apply --config <app>/pricing.config.json --yes
+node scripts/play-tiers.mjs verify --config <app>/pricing.config.json         # App Store: verify after the start date
+```
+
+If the user changes a price decision, change the config (shares, pins, rules), commit it, and re-plan. Never fix prices by hand outside the config.
+
+## The pricing config
+
+```json
+{
+  "rounding": "charm", "endings": ["99"],
+  "repair": "plus-monthly",
+  "rules": [
+    { "cheaper": "plus-monthly", "dearer": "pro-monthly" },
+    { "cheaper": "pro-annual", "dearer": "plus-monthly", "dearerTimes": 12 }
+  ],
+  "products": {
+    "plus-monthly": { "usd": 4.99, "ratios": { "4": 0.118, "5": 0.118 }, "pins": { "IN": 59 } },
+    "pro-monthly":  { "usd": 5.99, "ratios": { "4": 0.165, "5": 0.165 } },
+    "pro-annual":   { "usd": 39.99, "ratios": { "4": 0.175, "5": 0.175 } }
+  },
+  "appStore": { "app": "APP_ID", "out": "iap-pricing", "products": { "plus-monthly": { "id": "SUB_ID", "kind": "subscription" } } },
+  "play": { "package": "com.example", "serviceAccount": "keys/play.json", "out": "iap-pricing",
+            "products": { "plus-monthly": { "productId": "plus", "basePlanId": "monthly" } } }
+}
+```
+
+- `ratios` change a tier's share per product. Tiers not listed keep the tier file's share.
+- `pins` are ISO2 codes and set an exact local price in both stores (the App Store side maps them to ISO3).
+- `rules` read as `cheaperTimes x cheaper < dearerTimes x dearer`. After rounding, any territory that breaks a rule gets the `repair` product moved to the best charm price that satisfies every rule. Pick the plan that exists to be compared (usually the cheapest) as `repair`, never the anchor plan.
+- Paths are relative to the config file. Keep the service account path out of git if the key is.
+
+Build a config the first time, after the user has agreed the prices, so the next run is the fast path.
 
 ## Pick the output
 
@@ -51,7 +102,8 @@ Map the user's words to `--kind`:
 
 - Never write prices without showing the plan and getting an explicit yes. Pricing is live for real customers.
 - Never pick a 0.00 price point. The script excludes it.
-- With several products in one subscription group, check that the cheaper plan stays below the dearer one in every territory after rounding. Pin the cheaper one a step lower where they collide.
+- With several products in one subscription group, put the ordering in the config's `rules`. plan-all and play-tiers repair breaks and exit 2 if any remain; treat that as a blocker.
+- Google Play: Tier 1 regions keep what Play charges today. Prices are converted by Google (`pricing:convertRegionPrices`) and written with the regions version Google used; an older version rejects changed currencies (Argentina is ARS from 2026/01). Existing Play subscribers keep their price unless you run a price migration.
 - Paywalls must show the StoreKit or RevenueCat localized price string, never a hardcoded amount. Check this before applying.
 - Introductory offers, promotional offers, offer codes and win-back offers have their own per-territory prices and are not changed by this workflow. Say so if the app uses them.
 
