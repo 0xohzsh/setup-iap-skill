@@ -61,7 +61,7 @@ The skill always snaps to a real store price that ends in 99 or .99 where one is
 ## Install the skill
 
 ```bash
-git clone <this-repo-url> setup-iap-skill
+git clone https://github.com/0xohzsh/setup-iap-skill.git
 mkdir -p ~/.claude/skills
 cp -R setup-iap-skill/setup-iap ~/.claude/skills/setup-iap
 ```
