@@ -118,14 +118,15 @@ async function ladderFor(k, territory, cacheDir) {
 
 // 2 = a 99 ending (4.99, 699, 99000), 1 = a 9 ending (17.90, 59, 4900), 0 = anything else (12.49).
 // With cents, only the cents count, so 9.90 is a 9 ending, not 99.
-export function charmRank(price) {
+// `endings` lists the two-digit endings that count as best (default ['99']; for example ['99', '49']).
+export function charmRank(price, endings = ['99']) {
   const cents = Math.round(price * 100);
   if (cents % 100 !== 0) {
-    const c = cents % 100;
-    return c === 99 ? 2 : c === 90 ? 1 : 0;
+    const c = String(cents % 100).padStart(2, '0');
+    return endings.includes(c) ? 2 : c === '90' ? 1 : 0;
   }
   const d = String(cents / 100).replace(/0+$/, '');
-  return d.endsWith('99') ? 2 : d.endsWith('9') ? 1 : 0;
+  return endings.some((e) => d.endsWith(e)) ? 2 : d.endsWith('9') ? 1 : 0;
 }
 
 function closest(points, target) {
@@ -138,13 +139,13 @@ function closest(points, target) {
 // A point above zero and not above the anchor. rounding 'closest': the point nearest the target.
 // rounding 'charm' (default): the nearest point ending in 99, else in 9, within `tolerance` of the
 // target (a share of it, default 0.2); if neither exists that close, the nearest point. Ties go lower.
-export function choosePoint(points, target, anchor, { rounding = 'charm', tolerance = 0.2 } = {}) {
+export function choosePoint(points, target, anchor, { rounding = 'charm', tolerance = 0.2, endings = ['99'] } = {}) {
   const candidates = points.filter((p) => p.price > 0 && p.price <= anchor + 1e-9);
   if (!candidates.length) return null;
   if (rounding === 'charm') {
     const near = candidates.filter((p) => Math.abs(p.price - target) <= target * tolerance + 1e-9);
     for (const rank of [2, 1]) {
-      const hits = near.filter((p) => charmRank(p.price) === rank);
+      const hits = near.filter((p) => charmRank(p.price, endings) === rank);
       if (hits.length) return closest(hits, target);
     }
   }
@@ -219,6 +220,7 @@ async function plan(a, tiers) {
   const rounding = a.rounding ?? 'charm';
   if (!['charm', 'closest'].includes(rounding)) die('--rounding must be charm or closest');
   const tolerance = a['charm-tolerance'] ? Number(a['charm-tolerance']) : 0.2;
+  const endings = String(a['charm-endings'] ?? '99').split(',').map((e) => e.trim().replace(/^\./, '').padStart(2, '0'));
   const pins = a.pins ? JSON.parse(readFileSync(a.pins, 'utf8')) : {};
   const territories = [...anchors.keys()].sort();
   const untiered = [];
@@ -238,7 +240,7 @@ async function plan(a, tiers) {
       return { ...row, target: Number(pins[t]), chosen: pinned.price, pointId: pinned.id, mode: 'manual', note: 'pinned', effective: money(pinned.price / anchor.price) };
     }
     if (tier === 1) return { ...row, chosen: anchor.price, pointId: anchor.id, mode: t === 'USA' ? 'base' : 'automatic' };
-    const pick = choosePoint(ladder, anchor.price * ratio, anchor.price, { rounding, tolerance });
+    const pick = choosePoint(ladder, anchor.price * ratio, anchor.price, { rounding, tolerance, endings });
     if (!pick) return { ...row, chosen: anchor.price, pointId: anchor.id, mode: 'automatic', note: 'no paid price point at or below the anchor' };
     return { ...row, chosen: pick.price, pointId: pick.id, mode: 'manual', effective: money(pick.price / anchor.price) };
   });

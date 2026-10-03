@@ -39,7 +39,7 @@ Map the user's words to `--kind`:
 
 ## Options
 
-- `--rounding charm` (default) picks the price closest to the target that ends in 99 or .99 (`4.99`, `699`, `99000`), within 20% of the target (`--charm-tolerance 0.2`). If none exists, it takes a 9 or .90 ending, then the plain closest point. `--rounding closest` picks the closest point to the target, whatever it ends in.
+- `--rounding charm` (default) picks the price closest to the target that ends in 99 or .99 (`4.99`, `699`, `99000`), within 20% of the target (`--charm-tolerance 0.2`). If none exists, it takes a 9 or .90 ending, then the plain closest point. `--rounding closest` picks the closest point to the target, whatever it ends in. `--charm-endings 99,49` also accepts .49 and ...49 endings as best (default `99`).
 - `--ratios 4=0.4,5=0.4` changes a tier's share for this run only. Use it when one product needs different shares from another, for example a yearly plan priced lower in tiers 4 and 5.
 - `--pins pins.json` sets an exact price for a territory, for example `{"NZL": 8.99}`. A pin wins over the tier and is written even in Tier 1. Use it to keep a cheaper plan below a dearer one where the rounding makes them equal.
 - `--overrides overrides.json` moves territories between tiers, for example `{"LUX": 1, "ISL": 1}`. Use it when the user disagrees with a tier.
