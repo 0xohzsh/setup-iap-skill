@@ -1,6 +1,6 @@
-# setup-iap: fair country pricing for your App Store in-app purchases
+# setup-iap: fair country pricing for your App Store and Google Play purchases
 
-A skill for [Claude Code](https://claude.com/claude-code) that prices your in-app purchases fairly in every country. It works for subscriptions, one-time unlocks, consumables (like coins) and non-consumables (like "Remove ads"). People in countries where money goes less far pay less. You keep your US price exactly as it is.
+A skill for [Claude Code](https://claude.com/claude-code) that prices your in-app purchases fairly in every country, on the App Store and on Google Play. On the App Store it works for subscriptions, one-time unlocks, consumables (like coins) and non-consumables (like "Remove ads"). On Google Play it works for subscriptions. People in countries where money goes less far pay less. You keep your US price exactly as it is.
 
 You don't need to know anything about pricing to use it. You type `/setup-iap`, answer a few questions, check a table, and say yes.
 
@@ -35,7 +35,7 @@ Every country is in one of five groups ("tiers"). Each group pays a share of App
 
 The full list of 250 countries is in [`setup-iap/assets/tiers.json`](setup-iap/assets/tiers.json). It comes from [activationpal.com/country-pricing](https://activationpal.com/country-pricing). Don't agree with a country's tier? You can move it (see "Change a country's tier" below).
 
-The skill always snaps to a real Apple price in each country, so prices look natural (₹160, not ₹159.60). It never makes anything free, and never charges more than Apple's normal price.
+The skill always snaps to a real store price that ends in 99 or .99 where one is close (₹149, $2.99), so prices look natural. It never makes anything free, and never charges more than Apple's normal price. Want a different share for one product, for example a cheaper yearly plan in tiers 4 and 5? That is one line in the pricing config (below).
 
 ---
 
@@ -47,7 +47,8 @@ The skill always snaps to a real Apple price in each country, so prices look nat
    ```bash
    brew install asc
    ```
-4. **An App Store Connect API key**, again only for setting prices:
+4. **A Google Play service account key**, only for Google Play. In Google Cloud, enable the *Google Play Android Developer API*, create a service account, and download its JSON key. In Play Console, invite the service account's email with **Manage orders and subscriptions** permission on your app.
+5. **An App Store Connect API key**, again only for setting prices:
    1. Open [App Store Connect → Users and Access → Integrations → App Store Connect API](https://appstoreconnect.apple.com/access/integrations/api).
    2. Create a key with the **App Manager** role and download the `.p8` file. You can only download it once, so keep it safe.
    3. Note the **Key ID** and the **Issuer ID** shown on that page.
@@ -107,6 +108,36 @@ You don't need a new app version or an App Review. Price changes go live on thei
 - **Some countries are skipped.** The list has 250 countries, but the App Store sells in about 175. The rest (for example Cuba or Iran) can't buy apps anyway, and the skill tells you which were skipped.
 - **Free trials, intro prices and offer codes are not changed.** They have their own prices in App Store Connect.
 
+## Save your decisions in a pricing config
+
+The first time, you decide the shares, maybe pin a price or two, and check the plans line up (for example "Plus must stay cheaper than Pro"). Save those decisions in `pricing.config.json` in your app's repo, and every later run is one command per store:
+
+```json
+{
+  "rounding": "charm",
+  "repair": "plus-monthly",
+  "rules": [
+    { "cheaper": "plus-monthly", "dearer": "pro-monthly" },
+    { "cheaper": "pro-annual", "dearer": "plus-monthly", "dearerTimes": 12 }
+  ],
+  "products": {
+    "plus-monthly": { "usd": 4.99, "ratios": { "4": 0.12, "5": 0.12 }, "pins": { "IN": 59 } },
+    "pro-monthly":  { "usd": 5.99, "ratios": { "4": 0.165, "5": 0.165 } },
+    "pro-annual":   { "usd": 39.99, "ratios": { "4": 0.175, "5": 0.175 } }
+  },
+  "appStore": { "app": "YOUR_APP_ID", "out": "iap-pricing",
+                "products": { "plus-monthly": { "id": "SUBSCRIPTION_ID", "kind": "subscription" } } },
+  "play": { "package": "com.example.app", "serviceAccount": "keys/play.json", "out": "iap-pricing",
+            "products": { "plus-monthly": { "productId": "plus", "basePlanId": "monthly" } } }
+}
+```
+
+- `ratios`: the share a tier pays for that product. Tiers you leave out use the defaults above.
+- `pins`: an exact price for a country (two-letter code), in both stores.
+- `rules`: read "cheaper < dearer". `dearerTimes: 12` means "a year of monthly". Rounding can break a rule in a few countries; the skill then moves the `repair` product to the nearest price that keeps every rule.
+
+Then ask Claude to "re-run pricing from the config", or run the scripts yourself (below).
+
 ## Change a country's tier
 
 Create a small file, for example `overrides.json`:
@@ -121,7 +152,7 @@ Then ask Claude to use it ("use overrides.json"). The codes are three-letter cou
 
 ## Run it without Claude (optional)
 
-The skill is a single script, so you can run it yourself:
+The scripts need only Node.js, so you can run them yourself. One App Store product at a time:
 
 ```bash
 cd setup-iap
@@ -134,16 +165,30 @@ node scripts/iap-tiers.mjs verify --plan iap-pricing/<IAP_ID>/plan.json         
 
 Use `--kind subscription` for auto-renewing subscriptions and `--kind iap` for everything else.
 
+Everything at once, from a pricing config:
+
+```bash
+node scripts/plan-all.mjs --config pricing.config.json                    # App Store: every product, rules repaired
+node scripts/iap-tiers.mjs apply --plan iap-pricing/<key>/plan.json --yes  # App Store: write one product
+node scripts/play-tiers.mjs plan --config pricing.config.json             # Google Play: plan
+node scripts/play-tiers.mjs apply --config pricing.config.json --yes      # Google Play: write
+node scripts/play-tiers.mjs verify --config pricing.config.json           # Google Play: check
+```
+
 ## How it works (for the curious)
 
-For each product the script reads your US price. It then asks Apple for that price's full equivalent in every country (the "anchor"), multiplies the anchor by the country's tier share, and picks the closest real Apple price at or below the anchor. Full details, App Store Connect endpoints and known caveats are in [`setup-iap/REFERENCE.md`](setup-iap/REFERENCE.md).
+For each product the script reads your US price. It then asks Apple for that price's full equivalent in every country (the "anchor"), multiplies the anchor by the country's tier share, and picks a real Apple price at or below the anchor: one ending in 99 if it is close, otherwise the closest. Google Play has no fixed price list, so `play-tiers.mjs` asks Google to convert each tier's share of the US price into local money, rounds it the same way, and keeps tier 1 countries at the price Play charges today. Full details, App Store Connect endpoints and known caveats are in [`setup-iap/REFERENCE.md`](setup-iap/REFERENCE.md).
 
 ## Limits
 
-- App Store only. Google Play is not covered.
+- Google Play: subscriptions only (not one-time products). Existing Play subscribers keep their old price until you run a price migration in Play Console.
 - It only lowers prices relative to Apple's default. It never raises them above it.
 - Prices with a future start date show up in App Store Connect only once that date arrives.
 
 ## Credits
 
 Country tiers: [activationpal.com/country-pricing](https://activationpal.com/country-pricing). App Store Connect access: [asc](https://asccli.sh).
+
+## License
+
+MIT for the code (see [LICENSE](LICENSE)). The country tier list in `setup-iap/assets/tiers.json` comes from activationpal.com.

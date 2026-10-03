@@ -16,7 +16,7 @@
 // subscribers keep their price: Play moves them only through a separate price migration.
 //
 // Config: "play": { "package": "...", "serviceAccount": "path/to/key.json", "out": "dir",
-//   "products": { "<key>": { "productId": "maggie_pro", "basePlanId": "monthly" } } }
+//   "products": { "<key>": { "productId": "pro", "basePlanId": "monthly" } } }
 
 import crypto from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
