@@ -20,7 +20,7 @@ Map the user's words to `--kind`:
 
 ## Workflow
 
-1. **Find products.** Run `asc apps list` for the app ID, then `asc iap list --app APP --paginate` and `asc subscriptions list --app APP`. Show ID, product ID, type, state and current US price (`asc iap pricing summary --app APP`). Ask which products to include. Skip anything removed from sale unless asked.
+1. **Find products.** Run `asc apps list` for the app ID, then `asc iap list --app APP --paginate` and `asc subscriptions list --app APP`. Show ID, product ID, type, state and current US price (`asc iap pricing summary --app APP`; it is slow and can time out, so retry or rely on the plan's USA row). Use the numeric ID as `--product`. Ask which products to include. Skip anything removed from sale unless asked.
 2. **Check the US price is final.** A later US price change re-equalizes every territory and wipes the tiers. If the user wants a new US price, set it first (`asc iap pricing schedules create ... --price X`, or `asc subscriptions pricing prices set --territory USA --price X`), then plan.
 3. **Plan (dry run, read-only):**
    ```bash
@@ -39,6 +39,9 @@ Map the user's words to `--kind`:
 
 ## Options
 
+- `--rounding charm` (default) picks the price closest to the target that ends in 99 or .99 (`4.99`, `699`, `99000`), within 20% of the target (`--charm-tolerance 0.2`). If none exists, it takes a 9 or .90 ending, then the plain closest point. `--rounding closest` picks the closest point to the target, whatever it ends in.
+- `--ratios 4=0.4,5=0.4` changes a tier's share for this run only. Use it when one product needs different shares from another, for example a yearly plan priced lower in tiers 4 and 5.
+- `--pins pins.json` sets an exact price for a territory, for example `{"NZL": 8.99}`. A pin wins over the tier and is written even in Tier 1. Use it to keep a cheaper plan below a dearer one where the rounding makes them equal.
 - `--overrides overrides.json` moves territories between tiers, for example `{"LUX": 1, "ISL": 1}`. Use it when the user disagrees with a tier.
 - `--tiers PATH` uses a different tier file of the same shape.
 - `--concurrency N` sets the number of parallel ladder downloads (default 4). Lower it if App Store Connect rate-limits.
@@ -48,6 +51,7 @@ Map the user's words to `--kind`:
 
 - Never write prices without showing the plan and getting an explicit yes. Pricing is live for real customers.
 - Never pick a 0.00 price point. The script excludes it.
+- With several products in one subscription group, check that the cheaper plan stays below the dearer one in every territory after rounding. Pin the cheaper one a step lower where they collide.
 - Paywalls must show the StoreKit or RevenueCat localized price string, never a hardcoded amount. Check this before applying.
 - Introductory offers, promotional offers, offer codes and win-back offers have their own per-territory prices and are not changed by this workflow. Say so if the app uses them.
 

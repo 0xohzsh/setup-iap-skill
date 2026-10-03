@@ -9,9 +9,12 @@
 //
 // Common flags: --tiers PATH (default ../assets/tiers.json), --overrides PATH ({"LUX": 1}),
 // --concurrency N (default 4), --cache DIR (default <out>/cache).
+// Plan flags: --rounding charm|closest (default charm: prefer prices ending in 99 / .99),
+// --ratios 4=0.4,5=0.4 (change a tier's share for this run), --pins PATH ({"NZL": 8.99}: exact
+// price for a territory, written as manual even in Tier 1).
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -31,11 +34,25 @@ function parseArgs(argv) {
   return out;
 }
 
+const CURRENCIES = (() => {
+  try { return JSON.parse(readFileSync(join(HERE, '..', 'assets', 'territory-currencies.json'), 'utf8')).currencies; } catch { return {}; }
+})();
+
 const die = (msg) => { console.error(`iap-tiers: ${msg}`); process.exit(1); };
 const money = (n) => Math.round(n * 100) / 100;
 
-function loadTiers(path, overridesPath) {
+function loadTiers(path, overridesPath, ratiosArg) {
   const data = JSON.parse(readFileSync(path, 'utf8'));
+  if (ratiosArg) {
+    // "4=0.4,5=0.25": a per-run share for a tier, so one product can price differently from another.
+    for (const pair of String(ratiosArg).split(',')) {
+      const [tier, ratio] = pair.split('=').map((x) => x.trim());
+      const t = data.tiers.find((x) => String(x.tier) === tier);
+      const r = Number(ratio);
+      if (!t || !(r > 0 && r <= 1)) die(`--ratios: bad entry "${pair}" (want TIER=SHARE, share in (0, 1])`);
+      t.ratio = r;
+    }
+  }
   const byIso3 = new Map();
   for (const t of data.tiers) {
     for (const c of t.countries) byIso3.set(c.iso3, { tier: t.tier, ratio: t.ratio, name: c.name, iso2: c.iso2 });
@@ -51,14 +68,15 @@ function loadTiers(path, overridesPath) {
   return { version: data.version, source: data.source, byIso3 };
 }
 
-async function asc(args, { retries = 3 } = {}) {
+async function asc(args, { retries = 5 } = {}) {
   for (let attempt = 1; ; attempt++) {
     try {
-      const { stdout } = await run('asc', [...args, '--output', 'json'], { maxBuffer: 256 * 1024 * 1024 });
+      const env = { ...process.env, ASC_TIMEOUT: process.env.ASC_TIMEOUT ?? '120s' };
+      const { stdout } = await run('asc', [...args, '--output', 'json'], { maxBuffer: 256 * 1024 * 1024, env });
       return JSON.parse(stdout);
     } catch (err) {
       if (attempt >= retries) throw new Error(`asc ${args.join(' ')} failed: ${(err.stderr || err.message).slice(0, 400)}`);
-      await new Promise((r) => setTimeout(r, 1500 * attempt));
+      await new Promise((r) => setTimeout(r, 4000 * attempt)); // App Store Connect often times out under load
     }
   }
 }
@@ -69,17 +87,19 @@ function decodePoint(id) {
 }
 
 function kindArgs(kind, product, app) {
-  const appArgs = app ? ['--app', app] : [];
+  // --app is only needed to resolve a product ID or name. With a numeric App Store Connect ID,
+  // passing it makes asc resolve every price point first, which can time out.
+  const appArgs = app && !/^\d+$/.test(String(product)) ? ['--app', app] : [];
   if (kind === 'iap') {
     return {
-      summary: ['iap', 'pricing', 'summary', '--iap-id', product, ...appArgs],
+      view: ['iap', 'view', '--id', product],
       ladder: (t) => ['iap', 'pricing', 'price-points', 'list', '--iap-id', product, '--territory', t, '--paginate', ...appArgs],
       equalize: (pt) => ['iap', 'pricing', 'price-points', 'equalizations', '--id', pt, '--limit', '8000'],
     };
   }
   if (kind === 'subscription') {
     return {
-      summary: ['subscriptions', 'pricing', 'summary', '--subscription-id', product, ...appArgs],
+      view: ['subscriptions', 'view', '--id', product],
       ladder: (t) => ['subscriptions', 'pricing', 'price-points', 'list', '--subscription-id', product, '--territory', t, '--paginate', ...appArgs],
       equalize: (pt) => ['subscriptions', 'pricing', 'price-points', 'equalizations', '--price-point-id', pt, '--limit', '8000'],
     };
@@ -96,14 +116,39 @@ async function ladderFor(k, territory, cacheDir) {
   return points;
 }
 
-// Closest point to target that is above zero and not above the anchor; ties go to the lower price.
-export function choosePoint(points, target, anchor) {
-  const candidates = points.filter((p) => p.price > 0 && p.price <= anchor + 1e-9);
-  if (!candidates.length) return null;
-  return candidates.reduce((best, p) => {
+// 2 = a 99 ending (4.99, 699, 99000), 1 = a 9 ending (17.90, 59, 4900), 0 = anything else (12.49).
+// With cents, only the cents count, so 9.90 is a 9 ending, not 99.
+export function charmRank(price) {
+  const cents = Math.round(price * 100);
+  if (cents % 100 !== 0) {
+    const c = cents % 100;
+    return c === 99 ? 2 : c === 90 ? 1 : 0;
+  }
+  const d = String(cents / 100).replace(/0+$/, '');
+  return d.endsWith('99') ? 2 : d.endsWith('9') ? 1 : 0;
+}
+
+function closest(points, target) {
+  return points.reduce((best, p) => {
     const d = Math.abs(p.price - target), bd = Math.abs(best.price - target);
     return d < bd - 1e-9 || (Math.abs(d - bd) <= 1e-9 && p.price < best.price) ? p : best;
   });
+}
+
+// A point above zero and not above the anchor. rounding 'closest': the point nearest the target.
+// rounding 'charm' (default): the nearest point ending in 99, else in 9, within `tolerance` of the
+// target (a share of it, default 0.2); if neither exists that close, the nearest point. Ties go lower.
+export function choosePoint(points, target, anchor, { rounding = 'charm', tolerance = 0.2 } = {}) {
+  const candidates = points.filter((p) => p.price > 0 && p.price <= anchor + 1e-9);
+  if (!candidates.length) return null;
+  if (rounding === 'charm') {
+    const near = candidates.filter((p) => Math.abs(p.price - target) <= target * tolerance + 1e-9);
+    for (const rank of [2, 1]) {
+      const hits = near.filter((p) => charmRank(p.price) === rank);
+      if (hits.length) return closest(hits, target);
+    }
+  }
+  return closest(candidates, target);
 }
 
 async function pool(items, n, fn) {
@@ -142,17 +187,23 @@ async function plan(a, tiers) {
   const cacheDir = resolve(a.cache ?? join(out, 'cache'));
   mkdirSync(cacheDir, { recursive: true });
 
-  const summary = await asc(k.summary);
-  const item = (summary.iaps ?? summary.subscriptions ?? [])[0];
-  if (!item) die(`no pricing summary for ${product}`);
-  if (item.baseTerritory && item.baseTerritory !== 'USA') die(`${item.productId} uses base territory ${item.baseTerritory}; this workflow anchors on USA. Change the base first or adapt the anchor.`);
-  const current = Number(item.currentPrice?.amount);
+  // Product identity (a light call; pricing summaries are slow and can time out).
+  if (!/^\d+$/.test(String(product))) die('--product must be the numeric App Store Connect ID (see `asc iap list` or `asc subscriptions list`)');
+  const view = (await asc(k.view)).data ?? {};
+  const item = { id: view.id ?? product, productId: view.attributes?.productId, name: view.attributes?.name };
+
+  // Current live price and currency per territory (also the read-back used by verify).
+  const live = await readLive(kind, item.id, a.app);
+  if (kind === 'iap') {
+    const base = await asc(['iap', 'pricing', 'schedules', 'base-territory', '--schedule-id', item.id]).catch(() => null);
+    const baseId = base?.data?.id;
+    if (baseId && baseId !== 'USA') die(`${item.productId} uses base territory ${baseId}; this workflow anchors on USA. Change the base first or adapt the anchor.`);
+  }
+  const usaLadderForBase = await ladderFor(k, 'USA', cacheDir);
+  const current = live.get('USA') ? priceAt(usaLadderForBase, live.get('USA').p) : null;
   const base = a['base-price'] ? Number(a['base-price']) : current;
   if (!(base > 0)) die('no current US price found; set the US price in App Store Connect first');
   if (current && Math.abs(base - current) > 1e-9) die(`--base-price ${base} differs from the current US price ${current}. Set the US price first, then run the tiers (a base change re-equalizes every territory).`);
-
-  // Current live price and currency per territory (also the read-back used by verify).
-  const live = await readLive(kind, item.id ?? product, a.app);
 
   const usa = await ladderFor(k, 'USA', cacheDir);
   const usaPoint = usa.find((p) => Math.abs(p.price - base) < 1e-9);
@@ -165,6 +216,10 @@ async function plan(a, tiers) {
     if (t) anchors.set(t, { price: Number(p.attributes.customerPrice), id: p.id });
   }
 
+  const rounding = a.rounding ?? 'charm';
+  if (!['charm', 'closest'].includes(rounding)) die('--rounding must be charm or closest');
+  const tolerance = a['charm-tolerance'] ? Number(a['charm-tolerance']) : 0.2;
+  const pins = a.pins ? JSON.parse(readFileSync(a.pins, 'utf8')) : {};
   const territories = [...anchors.keys()].sort();
   const untiered = [];
   const rows = await pool(territories, Number(a.concurrency ?? 4), async (t) => {
@@ -174,9 +229,16 @@ async function plan(a, tiers) {
     const tier = t === 'USA' ? 1 : info?.tier ?? 1;
     const ratio = t === 'USA' ? 1 : info?.ratio ?? 1;
     const now = live.get(t);
-    const row = { territory: t, name: info?.name ?? t, currency: now?.currency ?? null, current: now?.price ?? null, tier, ratio, overridden: !!info?.overridden, anchor: anchor.price, target: money(anchor.price * ratio) };
+    const ladder = await ladderFor(k, t, cacheDir);
+    const current = now ? priceAt(ladder, now.p) : anchor.price;
+    const row = { territory: t, name: info?.name ?? t, currency: CURRENCIES[t] ?? null, current, tier, ratio, overridden: !!info?.overridden, anchor: anchor.price, target: money(anchor.price * ratio) };
+    if (t !== 'USA' && pins[t] != null) {
+      // An explicit price wins over the tier, even in Tier 1. Exact point if the ladder has it.
+      const pinned = closest(ladder.filter((p) => p.price > 0), Number(pins[t]));
+      return { ...row, target: Number(pins[t]), chosen: pinned.price, pointId: pinned.id, mode: 'manual', note: 'pinned', effective: money(pinned.price / anchor.price) };
+    }
     if (tier === 1) return { ...row, chosen: anchor.price, pointId: anchor.id, mode: t === 'USA' ? 'base' : 'automatic' };
-    const pick = choosePoint(await ladderFor(k, t, cacheDir), anchor.price * ratio, anchor.price);
+    const pick = choosePoint(ladder, anchor.price * ratio, anchor.price, { rounding, tolerance });
     if (!pick) return { ...row, chosen: anchor.price, pointId: anchor.id, mode: 'automatic', note: 'no paid price point at or below the anchor' };
     return { ...row, chosen: pick.price, pointId: pick.id, mode: 'manual', effective: money(pick.price / anchor.price) };
   });
@@ -184,13 +246,13 @@ async function plan(a, tiers) {
   const notInStore = [...tiers.byIso3.keys()].filter((t) => !anchors.has(t)).sort();
   const doc = {
     mode: 'plan', kind, product: item.productId ?? product, productRef: item.id ?? product, name: item.name, app: a.app ?? null,
-    basePriceUSD: base, tiersVersion: tiers.version, generatedAt: new Date().toISOString(),
+    basePriceUSD: base, tiersVersion: tiers.version, rounding, ratios: a.ratios ?? null, pins, generatedAt: new Date().toISOString(),
     counts: { territories: rows.length, manual: rows.filter((r) => r.mode === 'manual').length, automatic: rows.filter((r) => r.mode === 'automatic').length },
     untiered: untiered.sort(), notInStore, rows,
   };
   writeFileSync(join(out, 'plan.json'), JSON.stringify(doc, null, 2) + '\n');
   writeFileSync(join(out, 'plan.md'),
-    `# ${doc.name ?? doc.product} (${kind}) tiered prices\n\nUS base $${base}. ${doc.counts.manual} discounted territories, ${doc.counts.automatic} at Apple's equalized price. Prices are in each territory's local currency.\n\n` +
+    `# ${doc.name ?? doc.product} (${kind}) tiered prices\n\nUS base $${base}. ${doc.counts.manual} discounted territories, ${doc.counts.automatic} at Apple's equalized price. Prices are in each territory's local currency. Rounding: ${rounding}${a.ratios ? `. Tier shares changed: ${a.ratios}` : ''}.\n\n` +
     (doc.untiered.length ? `Not in the tier list (kept at full price): ${doc.untiered.join(', ')}\n\n` : '') +
     table(rows, [['Territory', (r) => r.territory], ['Name', (r) => r.name], ['Currency', (r) => r.currency ?? ''], ['Tier', (r) => r.tier + (r.overridden ? '*' : '')], ['Current', (r) => r.current ?? ''], ['Anchor', (r) => r.anchor], ['Target', (r) => r.target], ['New', (r) => r.chosen], ['Mode', (r) => r.mode + (r.note ? ` (${r.note})` : '')]]) +
     `\n${notInStore.length} tier-list countries have no App Store storefront and were skipped: ${notInStore.join(', ')}\n`);
@@ -237,29 +299,55 @@ async function apply(a) {
   console.log(`apply: wrote ${manual.length} discounted territories for ${doc.product}. Run verify next.`);
 }
 
-// Effective price per territory: Map(territory -> { price, currency, manual }).
+// Live price per territory: Map(territory -> { p, manual }). Reads the raw schedule and decodes the
+// price index; asc's --resolved mode maps indices to prices across the wrong territory, so the price
+// itself is looked up later in that territory's own ladder.
 async function readLive(kind, id, app) {
   const appArgs = app ? ['--app', app] : [];
   const res = kind === 'iap'
-    ? await asc(['iap', 'pricing', 'schedules', 'manual-prices', '--schedule-id', id, '--resolved', '--paginate'])
+    ? await asc(['iap', 'pricing', 'schedules', 'manual-prices', '--schedule-id', id, '--paginate'])
     : await asc(['subscriptions', 'pricing', 'prices', 'list', '--subscription-id', id, '--resolved', '--paginate', ...appArgs]);
-  return new Map((res.prices ?? []).map((p) => [p.territory, { price: Number(p.customerPrice), currency: p.currency, manual: p.manual }]));
+  const live = new Map();
+  if (kind === 'iap') {
+    for (const row of res.data ?? []) {
+      const d = decodePoint(row.id);
+      if (d.t) live.set(d.t, { p: d.p, manual: true });
+    }
+  } else {
+    // Resolved rows carry the full price-point ID (correct); their customerPrice is not trusted.
+    for (const row of res.prices ?? []) {
+      const d = decodePoint(row.pricePointId ?? '');
+      if (row.territory && d.p) live.set(row.territory, { p: d.p, manual: true });
+    }
+  }
+  return live;
+}
+
+function priceAt(ladder, p) {
+  const hit = ladder.find((x) => decodePoint(x.id).p === p);
+  return hit ? hit.price : null;
 }
 
 async function verify(a) {
   if (!a.plan) die('verify needs --plan PATH/plan.json');
   const doc = JSON.parse(readFileSync(a.plan, 'utf8'));
   const live = await readLive(doc.kind, doc.productRef, doc.app);
-  const bad = doc.rows.filter((r) => r.mode === 'manual' && live.get(r.territory)?.price !== r.chosen)
-    .map((r) => `${r.territory}: planned ${r.chosen}, live ${live.get(r.territory)?.price ?? 'missing'}`);
+  // Compare price indices: the planned point ID carries the same index as the live price.
+  const bad = doc.rows.filter((r) => r.mode === 'manual' && live.get(r.territory)?.p !== decodePoint(r.pointId).p)
+    .map((r) => `${r.territory}: planned ${r.chosen} (index ${decodePoint(r.pointId).p}), live index ${live.get(r.territory)?.p ?? 'missing'}`);
   console.log(bad.length ? `verify: ${bad.length} mismatches\n${bad.join('\n')}` : `verify: all ${doc.counts.manual} discounted territories match`);
   if (bad.length && doc.kind === 'subscription') console.log('Subscription prices with a future start date show here only after that date.');
   process.exitCode = bad.length ? 2 : 0;
 }
 
-const a = parseArgs(process.argv.slice(2));
-const cmd = a._[0];
-const tiers = loadTiers(a.tiers ?? join(HERE, '..', 'assets', 'tiers.json'), a.overrides);
+// realpath on both sides: the skill folder is often a symlink.
+const real = (f) => { try { return realpathSync(f); } catch { return resolve(f); } };
+const isMain = !!process.argv[1] && real(process.argv[1]) === real(fileURLToPath(import.meta.url));
+const a = parseArgs(isMain ? process.argv.slice(2) : ['--noop']);
+const cmd = isMain ? a._[0] : null;
+const tiers = loadTiers(a.tiers ?? join(HERE, '..', 'assets', 'tiers.json'), a.overrides, a.ratios);
 const cmds = { estimate: () => estimate(a, tiers), plan: () => plan(a, tiers), apply: () => apply(a), verify: () => verify(a) };
-if (!cmds[cmd]) die('usage: iap-tiers.mjs <estimate|plan|apply|verify> [flags]  (see SKILL.md)');
-cmds[cmd]().catch((e) => die(e.message));
+if (isMain) {
+  if (!cmds[cmd]) die('usage: iap-tiers.mjs <estimate|plan|apply|verify> [flags]  (see SKILL.md)');
+  cmds[cmd]().catch((e) => die(e.message));
+}

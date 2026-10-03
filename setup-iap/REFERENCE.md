@@ -7,7 +7,7 @@
 3. Fetch its equalizations: Apple's full local price in every storefront. That price is the territory's **anchor**.
 4. For each territory:
    - Tier 1, or not in the tier list: keep the anchor and leave the territory automatic.
-   - Otherwise: `target = anchor x ratio`. From the territory's own price ladder, pick the point closest to the target that is above 0.00 and not above the anchor. A tie goes to the lower price.
+   - Otherwise: `target = anchor x ratio`. From the territory's own price ladder, take the points above 0.00 and not above the anchor. With `--rounding charm` (default), pick the one closest to the target that ends in 99 (cents `.99`, or a whole price whose digits end in 99), within the tolerance; else a 9 or `.90` ending; else the closest point. With `--rounding closest`, pick the closest point. A tie goes to the lower price. A `--pins` entry replaces all of this with the ladder point nearest the pinned price.
 5. Always compute from the anchor. Never apply a ratio to a price that is already discounted.
 
 ## App Store Connect mapping
